@@ -1,126 +1,92 @@
-name: Build Mesa Adreno Full (Jammy Stable)
+name: Build Mesa for Jammy (Adreno 730/KGSL)
 
 on:
   workflow_dispatch:
     inputs:
-      tag:
-        description: 'Mesa Branch/Tag (e.g. mesa-24.1.0)'
+      mesa_version:
+        description: 'Mesa Branch/Tag'
         required: true
-        default: 'adreno-ubuntu-noble-updates'
+        default: 'main'
 
 jobs:
   build:
-    runs-on: ubuntu-22.04-arm
+    runs-on: ubuntu-24.04-arm  # 利用 24.04 的 ARM 算力
+    container:
+      image: arm64v8/ubuntu:22.04  # 强制在 22.04 容器内编译以保证 GLIBC 兼容
+
     steps:
-      - name: Install Jammy Full Dependencies
+      - name: Update System & Install Base
         run: |
-          sudo apt update
-          # 补全 Jammy 版本的精准开发包
-          sudo apt install -y python3-pip ninja-build gettext \
-            libx11-dev libxext-dev libxdamage-dev libxfixes-dev \
-            libxcb-glx0-dev libxcb-shm0-dev libxcb-dri2-dev \
-            libxcb-dri3-dev libxcb-present-dev libxshmfence-dev \
-            libxxf86vm-dev libxrandr-dev libwayland-dev wayland-protocols \
-            libwayland-egl-backend-dev libclc-dev libelf-dev expat libxml2-dev \
-            libzstd-dev libudev-dev \
-            llvm-14-dev clang-14 libclang-14-dev # 开启 LLVM 支持以获得完整特性
+          apt update
+          apt install -y git build-essential python3-pip python3-mako \
+                         bison flex libx11-dev libxext-dev libxdamage-dev \
+                         libxfixes-dev libxcb-glx0-dev libxcb-dri2-0-dev \
+                         libxcb-dri3-dev libxcb-present-dev libxshmfence-dev \
+                         libxxf86vm-dev libxrandr-dev libwayland-dev \
+                         wayland-protocols libwayland-egl-backend-dev \
+                         libdrm-dev libx11-xcb-dev libxcb-shm0-dev \
+                         libxcb-randr0-dev libexpat1-dev libsensors-dev \
+                         llvm-15-dev clang-15 libclang-15-dev zlib1g-dev \
+                         libvulkan-dev libzstd-dev
+
+      - name: Install Modern Build Tools
+        run: |
+          # Jammy 默认的 meson 太旧，必须用 pip 安装新版
+          pip3 install meson ninja mako
+
+      - name: Clone Mesa Source
+        run: |
+          # 建议使用 mesa 官方库或带有 KGSL 补丁的仓库
+          git clone --depth 1 -b ${{ github.event.inputs.mesa_version }} https://gitlab.freedesktop.org/mesa/mesa.git ~/mesa
+
+      - name: Build and Install (The "Real" Config)
+        run: |
+          cd ~/mesa
+          # 关键点：屏蔽掉导致 Jammy 报错的 Rust 依赖 (nouveau/rusticl)
+          # 关键点：开启 Adreno 730 必需的 freedreno 和 turnip(vulkan)
+          # 关键点：针对安卓内核开启 kgsl
           
-          # 升级构建工具
-          sudo pip3 install meson mako
-
-      - name: Build Newest libdrm
-        run: |
-          git clone https://gitlab.freedesktop.org/mesa/drm.git --depth 1
-          cd drm
-          meson setup build -Dprefix=/usr -Dintel=disabled -Dradeon=disabled -Damdgpu=disabled -Dnouveau=disabled
-          ninja -C build install
-          cd ..
-
-      - name: Clone Target Mesa
-        run: |
-          # 使用你指定的仓库，它通常包含针对 Android/KGSL 的优化补丁
-          git clone -b ${{ github.event.inputs.tag }} --depth 1 https://github.com/lfdevs/mesa-for-android-container.git mesa_src
-
-      - name: Full Feature Meson Build
-        run: |
-          cd mesa_src
-          # 配置说明：
-          # -Dllvm=enabled: 开启 LLVM 提高 Shader 兼容性
-          # -Dgallium-drivers=freedreno: 开启 OpenGL 驱动
-          # -Dvulkan-drivers=freedreno: 开启 Turnip Vulkan 驱动
-          # -Dshared-glapi=enabled: 确保多个库之间共享 API 定义，增强稳定性
-          meson setup build \
-            -Dprefix=/opt/mesa-adreno \
-            -Dplatforms=x11,wayland \
-            -Dgallium-drivers=freedreno \
-            -Dvulkan-drivers=freedreno \
+          meson setup build/ \
+            --prefix=/usr \
+            --libdir=lib/aarch64-linux-gnu \
             -Dbuildtype=release \
-            -Doptimization=3 \
+            -Dplatforms=x11,wayland \
+            -Dgallium-drivers=freedreno,zink,swrast \
+            -Dvulkan-drivers=freedreno \
+            -Dfreedreno-kmds=kgsl,msm \
+            -Dgallium-rusticl=false \
+            -Dgallium-opencl=disabled \
             -Dllvm=enabled \
-            -Dshared-glapi=enabled \
+            -Dshared-llvm=enabled \
             -Dgles1=enabled \
             -Dgles2=enabled \
-            -Dopengl=enabled \
+            -Dopengl=true \
             -Dgbm=enabled \
             -Degl=enabled \
-            -Dgallium-rusticl=false \
-            -Dmicrosoft-clc=disabled
-          ninja -C build install
+            -Dglx=dri \
+            -Dtools=freedreno
 
-      - name: Create Portable Release
+          ninja -C build/
+          DESTDIR=$HOME/mesa_install ninja -C build/ install
+
+      - name: Package to DEB
         run: |
-          mkdir -p release_bin/drivers
-          cp -r /opt/mesa-adreno/* release_bin/drivers/
-          
-          cd release_bin
-          
-          # 增强版安装脚本：支持 ld.so.conf 优先级配置
-          cat <<'EOF' > install.sh
-          #!/bin/bash
-          INSTALL_DIR="/usr/local/lib/mesa-adreno"
-          echo "[1/3] 正在复制驱动文件到 $INSTALL_DIR..."
-          sudo mkdir -p $INSTALL_DIR
-          sudo cp -r ./drivers/* $INSTALL_DIR/
-          
-          echo "[2/3] 配置 Vulkan ICD 和环境变量..."
-          sudo mkdir -p /etc/profile.d
-          sudo bash -c "cat <<EOT > /etc/profile.d/mesa_adreno.sh
-          # 优先使用 Turnip Vulkan
-          export VK_ICD_FILENAMES=$INSTALL_DIR/share/vulkan/icd.d/freedreno_icd.aarch64.json
-          # 确保系统能找到 EGL/GLES 库
-          export LD_LIBRARY_PATH=$INSTALL_DIR/lib/aarch64-linux-gnu:\$LD_LIBRARY_PATH
-          # 针对 Adreno 730 的特定优化建议（可选）
-          export TU_DEBUG=sysmem 
-          EOT"
-          
-          echo "[3/3] 刷新系统动态库路径优先级..."
-          # 创建 ld 配置并将其设为高优先级
-          sudo bash -c "echo '$INSTALL_DIR/lib/aarch64-linux-gnu' > /etc/ld.so.conf.d/000-mesa-adreno.conf"
-          sudo ldconfig
-          
-          echo "=========================================="
-          echo "安装成功！"
-          echo "请执行: source /etc/profile.d/mesa_adreno.sh"
-          echo "使用 'vulkaninfo' 或 'glxinfo' 检查 Adreno 730 是否识别。"
-          echo "=========================================="
+          # 快速打包，不走复杂的 debian 源码流程，直接打二进制包
+          mkdir -p ~/deb/DEBIAN
+          cp -r ~/mesa_install/* ~/deb/
+          cat <<EOF > ~/deb/DEBIAN/control
+          Package: mesa-adreno-730-custom
+          Version: 24.1.0-custom
+          Section: libs
+          Priority: optional
+          Architecture: arm64
+          Maintainer: GitHubActions
+          Description: Custom Mesa build for Adreno 730 on Jammy (KGSL supported)
           EOF
+          dpkg-deb --build ~/deb ~/mesa-custom-jammy-arm64.deb
 
-          cat <<'EOF' > uninstall.sh
-          #!/bin/bash
-          INSTALL_DIR="/usr/local/lib/mesa-adreno"
-          echo "正在清理驱动..."
-          sudo rm -rf $INSTALL_DIR
-          sudo rm -f /etc/profile.d/mesa_adreno.sh
-          sudo rm -f /etc/ld.so.conf.d/000-mesa-adreno.conf
-          sudo ldconfig
-          echo "卸载完成，系统已恢复默认驱动。"
-          EOF
-
-          chmod +x install.sh uninstall.sh
-          tar -czvf ../mesa-adreno-730-full-jammy.tar.gz .
-
-      - name: Upload
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mesa-adreno-730-full-jammy
-          path: mesa-adreno-730-full-jammy.tar.gz
+          name: mesa-jammy-adreno730
+          path: ~/mesa-custom-jammy-arm64.deb
