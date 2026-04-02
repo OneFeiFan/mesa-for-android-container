@@ -1,29 +1,34 @@
-name: Build Mesa for Adreno 730 (Jammy Portable)
+name: Build Mesa Adreno Full (Jammy Stable)
 
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Mesa Branch/Tag'
+        description: 'Mesa Branch/Tag (e.g. mesa-24.1.0)'
         required: true
-        default: 'main' # 建议用最新的以支持 A730
+        default: 'adreno-ubuntu-noble-updates'
 
 jobs:
   build:
     runs-on: ubuntu-22.04-arm
     steps:
-      - name: Install Base Build Tools
+      - name: Install Jammy Full Dependencies
         run: |
           sudo apt update
-          sudo apt install -y python3-pip ninja-build gettext libx11-dev libxext-dev libxdamage-dev \
-                              libxfixes-dev libxcb-glx0-dev libxcb-shm0-dev libxcb-dri2-0-dev \
-                              libxcb-dri3-0-dev libxcb-present-dev libxshmfence-dev libxxf86vm-dev \
-                              libxrandr-dev libwayland-dev wayland-protocols libwayland-egl-backend-dev \
-                              libclc-dev libelf-dev expat libxml2-dev
-          # 升级 Meson 和 Mako (Jammy 默认版本过低)
+          # 补全 Jammy 版本的精准开发包
+          sudo apt install -y python3-pip ninja-build gettext \
+            libx11-dev libxext-dev libxdamage-dev libxfixes-dev \
+            libxcb-glx0-dev libxcb-shm0-dev libxcb-dri2-dev \
+            libxcb-dri3-dev libxcb-present-dev libxshmfence-dev \
+            libxxf86vm-dev libxrandr-dev libwayland-dev wayland-protocols \
+            libwayland-egl-backend-dev libclc-dev libelf-dev expat libxml2-dev \
+            libzstd-dev libudev-dev \
+            llvm-14-dev clang-14 libclang-14-dev # 开启 LLVM 支持以获得完整特性
+          
+          # 升级构建工具
           sudo pip3 install meson mako
 
-      - name: Build Newest libdrm (Mesa 24+ Requirement)
+      - name: Build Newest libdrm
         run: |
           git clone https://gitlab.freedesktop.org/mesa/drm.git --depth 1
           cd drm
@@ -31,79 +36,91 @@ jobs:
           ninja -C build install
           cd ..
 
-      - name: Clone Mesa
+      - name: Clone Target Mesa
         run: |
-          git clone -b ${{ github.event.inputs.tag }} --depth 1 https://gitlab.freedesktop.org/mesa/mesa.git
+          # 使用你指定的仓库，它通常包含针对 Android/KGSL 的优化补丁
+          git clone -b ${{ github.event.inputs.tag }} --depth 1 https://github.com/lfdevs/mesa-for-android-container.git mesa_src
 
-      - name: Compile Mesa (Adreno Only)
+      - name: Full Feature Meson Build
         run: |
-          cd mesa
-          # 核心配置：只编 freedreno 和 turnip，禁用 Rust 相关
+          cd mesa_src
+          # 配置说明：
+          # -Dllvm=enabled: 开启 LLVM 提高 Shader 兼容性
+          # -Dgallium-drivers=freedreno: 开启 OpenGL 驱动
+          # -Dvulkan-drivers=freedreno: 开启 Turnip Vulkan 驱动
+          # -Dshared-glapi=enabled: 确保多个库之间共享 API 定义，增强稳定性
           meson setup build \
-            -Dprefix=/opt/mesa-adreno-730 \
+            -Dprefix=/opt/mesa-adreno \
             -Dplatforms=x11,wayland \
             -Dgallium-drivers=freedreno \
             -Dvulkan-drivers=freedreno \
             -Dbuildtype=release \
-            -Dgallium-rusticl=false \
-            -Dmicrosoft-clc=disabled \
-            -Dllvm=disabled \
-            -Dgles1=disabled \
+            -Doptimization=3 \
+            -Dllvm=enabled \
+            -Dshared-glapi=enabled \
+            -Dgles1=enabled \
             -Dgles2=enabled \
             -Dopengl=enabled \
             -Dgbm=enabled \
-            -Degl=enabled
+            -Degl=enabled \
+            -Dgallium-rusticl=false \
+            -Dmicrosoft-clc=disabled
           ninja -C build install
 
-      - name: Prepare Portable Package
+      - name: Create Portable Release
         run: |
-          mkdir -p release_package/drivers
-          # 拷贝编译好的二进制产物
-          cp -r /opt/mesa-adreno-730/* release_package/drivers/
+          mkdir -p release_bin/drivers
+          cp -r /opt/mesa-adreno/* release_bin/drivers/
           
-          cd release_package
+          cd release_bin
           
-          # 1. 编写安装脚本
+          # 增强版安装脚本：支持 ld.so.conf 优先级配置
           cat <<'EOF' > install.sh
           #!/bin/bash
-          DEST="/usr/local/lib/mesa-adreno"
-          echo "正在安装 Adreno 730 优化版驱动到 $DEST ..."
-          sudo mkdir -p $DEST
-          sudo cp -r ./drivers/* $DEST/
+          INSTALL_DIR="/usr/local/lib/mesa-adreno"
+          echo "[1/3] 正在复制驱动文件到 $INSTALL_DIR..."
+          sudo mkdir -p $INSTALL_DIR
+          sudo cp -r ./drivers/* $INSTALL_DIR/
           
-          # 配置全局环境变量
-          echo "配置环境变量..."
+          echo "[2/3] 配置 Vulkan ICD 和环境变量..."
+          sudo mkdir -p /etc/profile.d
           sudo bash -c "cat <<EOT > /etc/profile.d/mesa_adreno.sh
-          export VK_ICD_FILENAMES=$DEST/share/vulkan/icd.d/freedreno_icd.aarch64.json
-          export LD_LIBRARY_PATH=$DEST/lib/aarch64-linux-gnu:\$LD_LIBRARY_PATH
+          # 优先使用 Turnip Vulkan
+          export VK_ICD_FILENAMES=$INSTALL_DIR/share/vulkan/icd.d/freedreno_icd.aarch64.json
+          # 确保系统能找到 EGL/GLES 库
+          export LD_LIBRARY_PATH=$INSTALL_DIR/lib/aarch64-linux-gnu:\$LD_LIBRARY_PATH
+          # 针对 Adreno 730 的特定优化建议（可选）
+          export TU_DEBUG=sysmem 
           EOT"
           
-          # 刷新动态库缓存
-          sudo bash -c "echo '$DEST/lib/aarch64-linux-gnu' > /etc/ld.so.conf.d/mesa_adreno.conf"
+          echo "[3/3] 刷新系统动态库路径优先级..."
+          # 创建 ld 配置并将其设为高优先级
+          sudo bash -c "echo '$INSTALL_DIR/lib/aarch64-linux-gnu' > /etc/ld.so.conf.d/000-mesa-adreno.conf"
           sudo ldconfig
           
-          echo "安装完成！请重新打开终端或执行 'source /etc/profile.d/mesa_adreno.sh' 生效。"
+          echo "=========================================="
+          echo "安装成功！"
+          echo "请执行: source /etc/profile.d/mesa_adreno.sh"
+          echo "使用 'vulkaninfo' 或 'glxinfo' 检查 Adreno 730 是否识别。"
+          echo "=========================================="
           EOF
 
-          # 2. 编写卸载脚本
           cat <<'EOF' > uninstall.sh
           #!/bin/bash
-          DEST="/usr/local/lib/mesa-adreno"
-          echo "正在卸载驱动并清理环境..."
-          sudo rm -rf $DEST
+          INSTALL_DIR="/usr/local/lib/mesa-adreno"
+          echo "正在清理驱动..."
+          sudo rm -rf $INSTALL_DIR
           sudo rm -f /etc/profile.d/mesa_adreno.sh
-          sudo rm -f /etc/ld.so.conf.d/mesa_adreno.conf
+          sudo rm -f /etc/ld.so.conf.d/000-mesa-adreno.conf
           sudo ldconfig
-          echo "卸载成功。"
+          echo "卸载完成，系统已恢复默认驱动。"
           EOF
 
           chmod +x install.sh uninstall.sh
-          
-          # 3. 打包
-          tar -czvf ../mesa-adreno-730-jammy.tar.gz .
+          tar -czvf ../mesa-adreno-730-full-jammy.tar.gz .
 
-      - name: Upload Artifact
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: mesa-adreno-730-jammy
-          path: mesa-adreno-730-jammy.tar.gz
+          name: mesa-adreno-730-full-jammy
+          path: mesa-adreno-730-full-jammy.tar.gz
