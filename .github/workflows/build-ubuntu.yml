@@ -47,24 +47,24 @@ jobs:
           # 关键点：针对安卓内核开启 kgsl
           
           meson setup build/ \
-            --prefix=/usr \
-            --libdir=lib/aarch64-linux-gnu \
-            -Dbuildtype=release \
-            -Dplatforms=x11,wayland \
-            -Dgallium-drivers=freedreno,zink,swrast \
-            -Dvulkan-drivers=freedreno \
-            -Dfreedreno-kmds=kgsl,msm \
-            -Dgallium-rusticl=false \
-            -Dgallium-opencl=disabled \
-            -Dllvm=enabled \
-            -Dshared-llvm=enabled \
-            -Dgles1=enabled \
-            -Dgles2=enabled \
-            -Dopengl=true \
-            -Dgbm=enabled \
-            -Degl=enabled \
-            -Dglx=dri \
-            -Dtools=freedreno
+          --prefix=/usr \
+          --libdir=lib/aarch64-linux-gnu \
+          -Dbuildtype=release \
+          -Dplatforms=x11,wayland \
+          -Dgallium-drivers=freedreno,zink,llvmpipe \
+          -Dvulkan-drivers=freedreno \
+          -Dfreedreno-kmds=kgsl,msm \
+          -Dgallium-rusticl=false \
+          -Dgallium-opencl=disabled \
+          -Dllvm=enabled \
+          -Dshared-llvm=enabled \
+          -Dgles1=enabled \
+          -Dgles2=enabled \
+          -Dopengl=true \
+          -Dgbm=enabled \
+          -Degl=enabled \
+          -Dglx=dri \
+          -Dtools=freedreno
 
           ninja -C build/
           DESTDIR=$HOME/mesa_install ninja -C build/ install
