@@ -1,12 +1,12 @@
-name: Build Ubuntu Packages (Jammy)
+name: Build Ubuntu Packages (Jammy No-Rust Edition)
 
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Branch or tag'
+        description: 'Branch or tag (e.g., main or specific branch)'
         required: true
-        default: 'adreno-ubuntu-jammy-updates' # 1. 默认标签修改为 c
+        default: 'main'
       draft_release:
         description: 'Draft a new release'
         required: true
@@ -18,21 +18,21 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04-arm # 2. 运行器修改为 22.04 ARM
+    runs-on: ubuntu-22.04-arm
 
     steps:
       - name: Install dependencies
         run: |
-          # 3. 替换 24.04 的 deb822 格式为 22.04 传统的 sources.list 格式
-          # 开启 deb-src 以允许 apt build-dep 获取源码构建依赖
+          # 开启 deb-src，获取基础构建依赖
           sudo sed -i '/^# deb-src/s/^# //' /etc/apt/sources.list
           sudo apt update
-          sudo apt build-dep -y mesa
+          # 尝试安装默认构建依赖，允许部分失败
+          sudo apt build-dep -y mesa || true
           
-          # 4. 移除原脚本中 24.04 专属的 meson-1.5，加入 python3-pip
-          sudo apt install -y git ccache build-essential devscripts fakeroot quilt git-buildpackage pristine-tar python3-pip libxfixes-dev libarchive-dev librust-paste-dev librust-syn-dev bindgen
+          # 移除 24.04 独有的包，保留 Jammy 可用的基础包
+          sudo apt install -y git ccache build-essential devscripts fakeroot quilt git-buildpackage pristine-tar python3-pip libxfixes-dev libarchive-dev
           
-          # 5. Jammy 仓库自带的 meson 版本(0.61.x)太老，无法编译新版 Mesa，必须通过 pip 强制安装最新版
+          # 使用 pip 强刷最新版构建工具
           sudo pip3 install meson ninja
 
       - name: Cache ccache
@@ -47,26 +47,38 @@ jobs:
         run: |
           export CCACHE_DIR=~/.ccache
           ccache --max-size=2G
-          ccache --show-config
           ccache --zero-stats
-          ccache --show-stats
 
       - name: Clone repository
         run: |
-          cd ~
           git config --global user.email "actions@github.com"
           git config --global user.name "GitHub Actions"
-          git clone -b ${{ github.event.inputs.tag }} --depth 1 https://github.com/lfdevs/mesa-for-android-container.git
+          git clone -b ${{ github.event.inputs.tag }} --depth 1 https://github.com/lfdevs/mesa-for-android-container.git ~/mesa-for-android-container
+
+      - name: 🚨 Hack Debian Packaging (Strip Rust)
+        run: |
+          cd ~/mesa-for-android-container
+          echo "开始物理剔除 Rust 依赖..."
+          # 从控制文件中删掉导致 Jammy 报错的包
+          sed -i 's/librust-paste-dev,//g' debian/control
+          sed -i 's/librust-syn-dev,//g' debian/control
+          sed -i 's/bindgen,//g' debian/control
+          sed -i 's/rustc,//g' debian/control
+          sed -i 's/cargo,//g' debian/control
+          
+          echo "修改编译规则，禁用 Rust 相关的图形特性..."
+          # 禁用 Rusticl 和涉及 Rust 的实验性 Vulkan 功能
+          sed -i 's/-Dgallium-rusticl=true/-Dgallium-rusticl=false/g' debian/rules || true
+          sed -i 's/-Dvulkan-beta=true/-Dvulkan-beta=false/g' debian/rules || true
 
       - name: Build Mesa
         shell: bash
         run: |
           export CCACHE_DIR=~/.ccache
-          echo "Building Mesa..."
           cd ~/mesa-for-android-container
-          origtargz
-          gbp buildpackage -uc -us -jauto --git-ignore-branch
-          echo "Mesa build completed successfully!"
+          echo "Building Mesa in Jammy..."
+          # 注意这里的 -d 参数极其关键：它告诉打包器忽略剩余的缺失依赖，强行开始编译
+          gbp buildpackage -uc -us -jauto --git-ignore-branch -d
 
       - name: Save ccache
         uses: actions/cache/save@v4
@@ -100,7 +112,7 @@ jobs:
     if: ${{ github.event.inputs.draft_release == 'true' }}
     needs:
       - build
-    runs-on: ubuntu-22.04-arm # 6. 运行器修改为 22.04 ARM
+    runs-on: ubuntu-22.04-arm
 
     steps:
       - name: Download build artifacts
@@ -125,9 +137,9 @@ jobs:
         run: |
           version=$(find ./artifacts -name 'mesa-vulkan-drivers*.deb' -type f -print -quit | xargs basename | cut -d'_' -f2)
           if [[ "${{ github.event.inputs.tag }}" == *"turnip"* ]]; then
-            echo "RELEASE_TITLE=turnip-${version}_ubuntu_jammy" >> "$GITHUB_ENV" # 7. 产物命名修改为 jammy
+            echo "RELEASE_TITLE=turnip-${version}_ubuntu_jammy" >> "$GITHUB_ENV"
           else
-            echo "RELEASE_TITLE=${version}_ubuntu_jammy" >> "$GITHUB_ENV" # 7. 产物命名修改为 jammy
+            echo "RELEASE_TITLE=${version}_ubuntu_jammy" >> "$GITHUB_ENV"
           fi
 
       - name: Upload archives to draft release
